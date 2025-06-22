@@ -33,6 +33,9 @@ namespace Wallet_Crypto.Controllers
             if (string.IsNullOrEmpty(transaction.CryptoCode) || string.IsNullOrEmpty(transaction.Action))
                 return BadRequest("Faltan datos obligatorios.");
 
+            transaction.DateTime = DateTime.Now;
+
+
             if (transaction.Action == "sale")
             {
                 var totalComprado = _context.transactions
@@ -171,25 +174,68 @@ namespace Wallet_Crypto.Controllers
 
         //Editar una transaccion
         [HttpPatch("{id}")]
-        public async Task<IActionResult> EditarTransaccion(int id, [FromBody] JsonElement cambios)
+        public async Task<IActionResult> EditarTransaccion(int id, [FromBody] Transaction cambios)
         {
             var transaccion = await _context.transactions.FindAsync(id);
             if (transaccion == null)
                 return NotFound();
 
-            if(cambios.TryGetProperty("money", out var nuevoMonto))
+            if (cambios.Action.ToLower() == "sale")
             {
-                transaccion.Money = nuevoMonto.GetDecimal();
+                var totalComprado = await _context.transactions
+                    .Where(t => t.CryptoCode == cambios.CryptoCode && t.Action.ToLower() == "buy")
+                    .SumAsync(t => t.CryptoAmount);
+
+                var totalVendido = await _context.transactions
+                    .Where(t => t.CryptoCode == cambios.CryptoCode && t.Action.ToLower() == "sale" && t.Id != id)
+                    .SumAsync(t => t.CryptoAmount);
+
+                var disponible = totalComprado - totalVendido;
+
+                var montoAnterior = transaccion.CryptoAmount;
+                var nuevoDisponible = disponible + montoAnterior;
+
+                if (cambios.CryptoAmount > nuevoDisponible)
+                    return BadRequest($"No tenés suficiente {cambios.CryptoCode}. Disponible: {nuevoDisponible}");
             }
 
-            if(cambios.TryGetProperty("datetime", out var nuevaFecha))
+            // Validaciones básicas
+            if (cambios.CryptoAmount <= 0)
+                return BadRequest("El monto debe ser mayor a cero.");
+            if (string.IsNullOrEmpty(cambios.CryptoCode))
+                return BadRequest("Debe especificar una criptomoneda.");
+
+            // Llamada a CriptoYa para obtener el precio actual
+            var httpClient = new HttpClient();
+            var url = $"https://criptoya.com/api/satoshitango/{cambios.CryptoCode.ToLower()}/ars";
+
+            HttpResponseMessage response;
+            try
             {
-                transaccion.DateTime = DateTime.Parse(nuevaFecha.GetString());
+                response = await httpClient.GetAsync(url);
+                response.EnsureSuccessStatusCode();
             }
+            catch
+            {
+                return BadRequest("Error al obtener datos de CriptoYa.");
+            }
+
+            var json = await response.Content.ReadAsStringAsync();
+            var data = JsonDocument.Parse(json);
+            var bid = data.RootElement.GetProperty("bid").GetDecimal();
+
+            var dineroCalculado = cambios.CryptoAmount * bid;
+
+            // Aplicar cambios
+            transaccion.CryptoCode = cambios.CryptoCode;
+            transaccion.CryptoAmount = cambios.CryptoAmount;
+            transaccion.Money = Math.Round(dineroCalculado, 2);
+            transaccion.DateTime = DateTime.Now; // o conservar la original, según quieras
 
             await _context.SaveChangesAsync();
             return Ok(transaccion);
         }
+
 
 
         //Eliminar una transaccion
